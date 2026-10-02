@@ -66,6 +66,10 @@ local plugins = {
 	{ 'samlwood/vis-gruvbox', theme = true, file = 'gruvbox' },
 }
 
+-- optional: write commits to vis-plug.lock and restore them on fresh installs
+-- plug.lockfile()                          -- default: <vis config path>/vis-plug.lock
+-- plug.lockfile('/path/to/vis-plug.lock')  -- or a custom path (use an absolute path)
+
 -- require and optionally install plugins on init
 plug.init(plugins, true)
 
@@ -134,3 +138,5 @@ We support the following `vis` commands:
 `:plug-checkout {name} {commit|branch|tag}` - checkout a specific version of a plugin
 
 `:plug-commands` - list commands (these)
+
+`:plug-lock` - write plugin refs to the lockfile (`vis-plug.lock`)
