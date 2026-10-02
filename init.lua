@@ -176,6 +176,112 @@ local checkout = function(plug)
 	-- If no ref is specified, do nothing and keep current state
 end
 
+-- lockfile: record the commit of each plugin in vis-plug.lock
+local lock_enabled = false
+local lockfile_path = nil
+local config_dir = nil
+
+-- enable the lockfile, optionally with a custom path.
+M.lockfile = function(path)
+	lock_enabled = true
+	if type(path) == 'string' then
+		lockfile_path = path
+	end
+	local info = debug.getinfo(2, 'S')
+	if info and info.source:sub(1, 1) == '@' then
+		config_dir = get_dir_from_file(info.source:sub(2))
+	end
+end
+
+local lock_file_name = "vis-plug.lock"
+
+local vis_config_dir = function()
+	return (os.getenv('XDG_CONFIG_HOME') or (os.getenv('HOME') .. '/.config')) .. '/vis'
+end
+
+local get_config_dir = function()
+	if config_dir then
+		return config_dir
+	end
+
+    return vis_config_dir()
+end
+
+local get_lockfile_path = function()
+	return lockfile_path or (get_config_dir() .. '/' .. lock_file_name)
+end
+
+-- read lockfile into a table { name = commit }
+local read_lockfile = function()
+	local locked = {}
+	local file = io.open(get_lockfile_path())
+	if not file then
+		return locked
+	end
+	for line in file:lines() do
+		if not line:match('^#') then
+			local name, commit = line:match('^(%S+)%s+(%x+)')
+			if name and commit then
+				locked[name] = commit
+			end
+		end
+	end
+	file:close()
+	return locked
+end
+
+local get_commit = function(plug)
+	local commit, success = execute('git -C ' .. plug.path .. ' rev-parse HEAD 2> /dev/null')
+	if success and commit:match('^%x+$') then
+		return commit
+	end
+end
+
+-- write `name commit url` per plugin; keeps the old entry if not installed
+local write_lockfile = function()
+	local locked = read_lockfile()
+	local lines = { '# vis-plug lockfile: name commit url' }
+	for _, plug in ipairs(plugins_conf) do
+		local commit = file_exists(plug.path) and get_commit(plug) or locked[plug.name]
+		if commit then
+			table.insert(lines, plug.name .. ' ' .. commit .. ' ' .. plug.url)
+		end
+	end
+	local content = table.concat(lines, '\n') .. '\n'
+	local path = get_lockfile_path()
+
+	-- skip writing if nothing changed
+	local old = io.open(path)
+	if old then
+		local old_content = old:read('*a')
+		old:close()
+		if old_content == content then
+			return true
+		end
+	end
+
+	os.execute('mkdir -p ' .. (get_dir_from_file(path) or '.'))
+	local file = io.open(path, 'w')
+	if not file then
+		return false
+	end
+	file:write(content)
+	file:close()
+	return true
+end
+
+-- reset freshly cloned plugins to their locked commit (unless a ref is set)
+local restore_locked = function(plugs)
+	local locked = read_lockfile()
+	for _, plug in ipairs(plugs) do
+		local commit = locked[plug.name]
+		if commit and not plug.ref then
+			-- keep the branch attached so :plug-update still works
+			os.execute('git -C ' .. plug.path .. ' reset --quiet --hard ' .. commit .. ' 2> /dev/null')
+		end
+	end
+end
+
 local plug_require = function(plug, args)
 	if not file_exists(plug.path) then
 		return
@@ -240,12 +346,14 @@ local install_plugins = function(silent)
 
 	-- build shell commands which run in the background and wait
 	local commands = {}
+    local cloned = {}
 	for i, plug in ipairs(plugins_conf) do
 		if not file_exists(plug.path) then
 			local path = get_base_path(plug.theme)
 			local clone_command = string.format('git -C %s clone %s --recurse-submodules --quiet 2> /dev/null &', path,
 				plug.url)
 			table.insert(commands, clone_command)
+            table.insert(cloned, plug)
 		end
 	end
 
@@ -254,10 +362,13 @@ local install_plugins = function(silent)
 		vis:info('Installing..')
 		vis:redraw()
 		execute_commands_in_background(commands)
+        if lock_enabled then restore_locked(cloned) end
 	end
 
 	-- checkout git repo
 	for_each_plugin(checkout)
+
+    if lock_enabled then write_lockfile() end
 
 	-- print result
 	if #commands > 0 then
@@ -378,6 +489,10 @@ local update_plugins = function()
 		end
 	end
 
+    if lock_enabled and #updates > 0 then
+        write_lockfile()
+    end
+
 	-- Show results
 	if #updates > 0 then
 		local update_messages = { string.format('Updated %d plugin(s):', #updates) }
@@ -437,6 +552,7 @@ local command_checkout = function(argv, force, win, selection, range)
 	end
 	plug.ref = ref
 	checkout(plug)
+    if lock_enabled then write_lockfile() end
 	vis:info('Checked out \'' .. ref .. '\'')
 	return true
 end
@@ -555,6 +671,15 @@ local command_outdated = function(argv, force, win, selection, range)
 	return true
 end
 
+local command_lock = function(argv, force, win, selection, range)
+	if write_lockfile() then
+		vis:info('Written ' .. get_lockfile_path())
+	else
+		vis:info('Could not write ' .. get_lockfile_path())
+	end
+	return true
+end
+
 local command_list_commands = function(argv, force, win, selection, range)
 	local arr = {}
 	table.insert(arr, 'vis-plug commands')
@@ -603,6 +728,10 @@ command_list = { {
 	name = 'plug-checkout',
 	desc = 'checkout {name} {commit|branch|tag}',
 	func = command_checkout
+}, {
+	name = 'plug-lock',
+    desc = 'write plugin commits to the lockfile (vis-plug.lock)',
+	func = command_lock
 }, {
 	name = 'plug-commands',
 	desc = 'list commands (these)',
